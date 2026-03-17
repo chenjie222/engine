@@ -482,7 +482,13 @@ func UpdateAllKLine(securityCode string, freq ...string) []KLine {
 	// 6. k线数据转换成KLine结构
 	var newKLines []KLine
 	for _, v := range history {
-		date := exchange.FixTradeDate(v.DateTime)
+		var date string
+		if freq_ == "D" {
+			date = exchange.FixTradeDate(v.DateTime)
+		} else {
+			// 对于分钟K线（1min, 5min等），date字段显示完整时间
+			date = v.DateTime
+		}
 		kline := KLine{
 			Date:     date,
 			Open:     v.Open,
@@ -530,4 +536,153 @@ func UpdateAllKLine(securityCode string, freq ...string) []KLine {
 		_ = api.SlicesToCsv(fname, klines)
 	}
 	return klines
+}
+
+// UpdateAllKLineWithStartDate 更新全部K线数据，支持指定开始日期
+//
+//	securityCode: 股票代码
+//	freq: 频率，如 "5min", "15min", "30min", "60min", "1min"
+//	startDateStr: 开始日期，格式 "YYYYMMDD"，如 "20200101"
+func UpdateAllKLineWithStartDate(securityCode string, freq string, startDateStr string) []KLine {
+	kType := uint16(proto.KLINE_TYPE_RI_K)
+	freq_ := "D"
+	period := 1
+	numberOfDay := 1
+	
+	duration, err := num.ParseFreq(freq)
+	// 只支持最大1小时, 超过1小时的, 取日线
+	if err == nil && duration <= time.Hour {
+		period_ := int(duration / time.Minute)
+		if period_ > 0 {
+			switch period_ {
+			case 5:
+				freq_ = "5min"
+				kType = uint16(proto.KLINE_TYPE_5MIN)
+			case 15:
+				freq_ = "15min"
+				kType = uint16(proto.KLINE_TYPE_15MIN)
+			case 30:
+				freq_ = "30min"
+				kType = uint16(proto.KLINE_TYPE_30MIN)
+			case 60:
+				freq_ = "60min"
+				kType = uint16(proto.KLINE_TYPE_1HOUR)
+			default:
+				freq_ = "1min"
+				period_ = 1
+				kType = uint16(proto.KLINE_TYPE_1MIN)
+			}
+			period = period_
+			numberOfDay = exchange.CN_DEFAULT_TOTALFZNUM / period
+		}
+	}
+	
+	// 1. 确定开始日期
+	startDate := exchange.MARKET_CH_FIRST_LISTTIME
+	if startDateStr != "" {
+		// 尝试解析用户提供的开始日期
+		parsedDate := exchange.FixTradeDate(startDateStr)
+		if parsedDate != "" {
+			startDate = parsedDate
+		}
+	}
+	
+	securityCode = exchange.CorrectSecurityCode(securityCode)
+	isIndex := exchange.AssertIndexBySecurityCode(securityCode)
+	
+	// 2. 确定结束日期
+	currentTradingDate := exchange.GetCurrentlyDay()
+	endDate := exchange.Today()
+	ts := exchange.TradingDateRange(startDate, endDate)
+	history := make([]quotes.SecurityBar, 0)
+	step := uint16(quotes.TDX_SECURITY_BARS_MAX)
+	max_ := math.MaxUint16
+	
+	max_days := max_ / numberOfDay
+	days_ := min(max_days, len(ts))
+	total_ := days_ * numberOfDay
+	total := uint16(total_)
+	start := uint16(0)
+	hs := make([]quotes.SecurityBarsReply, 0)
+	
+	tdxApi := gotdx.GetTdxApi()
+	// 3. 拉取数据
+	for {
+		count := step
+		if total-start >= step {
+			count = step
+		} else {
+			count = total - start
+		}
+		var data *quotes.SecurityBarsReply
+		var err error
+		retryTimes := 0
+		for retryTimes < quotes.DefaultRetryTimes {
+			if isIndex {
+				data, err = tdxApi.GetIndexBars(securityCode, kType, start, count)
+			} else {
+				data, err = tdxApi.GetKLine(securityCode, kType, start, count)
+			}
+			if err == nil && data != nil {
+				break
+			}
+			retryTimes++
+		}
+		if err != nil {
+			logger.Errorf("code=%s, error=%s", securityCode, err.Error())
+			return []KLine{}
+		}
+		hs = append(hs, *data)
+		if data.Count < count {
+			// 已经是最早的记录
+			break
+		}
+		start += count
+		if start >= total {
+			break
+		}
+	}
+	// 4. 由于K线数据，每次获取数据是从后往前获取, 所以这里需要反转历史数据的切片
+	hs = api.Reverse(hs)
+	startDate = exchange.FixTradeDate(startDate)
+	// 5. 调整成交量, 单位从手改成股, vol字段 * 100
+	for _, v := range hs {
+		for _, row := range v.List {
+			date := exchange.FixTradeDate(row.DateTime)
+			if date < startDate || date > currentTradingDate {
+				continue
+			}
+			row.Vol = row.Vol * 100
+			history = append(history, row)
+		}
+	}
+	// 6. k线数据转换成KLine结构
+	var newKLines []KLine
+	for _, v := range history {
+		var date string
+		if freq_ == "D" {
+			date = exchange.FixTradeDate(v.DateTime)
+		} else {
+			// 对于分钟K线（1min, 5min等），date字段显示完整时间
+			date = v.DateTime
+		}
+		kline := KLine{
+			Date:     date,
+			Open:     v.Open,
+			Close:    v.Close,
+			High:     v.High,
+			Low:      v.Low,
+			Volume:   v.Vol,
+			Amount:   v.Amount,
+			Up:       int(v.UpCount),
+			Down:     int(v.DownCount),
+			Datetime: v.DateTime,
+		}
+		newKLines = append(newKLines, kline)
+	}
+	
+	// 7. 前复权
+	calculatePreAdjustedStockPrice(securityCode, newKLines, startDate)
+	
+	return newKLines
 }

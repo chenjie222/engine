@@ -75,6 +75,7 @@ func initSubCommands() {
 	initTools()
 	initService()
 	initBackTest()
+	InitCmd5Min() // 初始化5分钟K线下载命令
 }
 
 // InitCommands 公开初始化函数
@@ -122,6 +123,7 @@ func GlobalFlags() *cli.Command {
 	engineCmd.AddCommand(CmdBackTesting, CmdRules, CmdTracker)
 	engineCmd.AddCommand(cmdBackTest)
 	engineCmd.AddCommand(CmdService)
+	engineCmd.AddCommand(Cmd5Min)
 	return engineCmd
 }
 
