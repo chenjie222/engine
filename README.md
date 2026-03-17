@@ -94,8 +94,11 @@ engine 5min --sector=sh688 --start=20240101
 
 **5. 下载所有股票**
 ```shell
-# 全量下载（股票+指数共约6000+只）
+# 全量下载（股票+指数共约6000+只，默认从2020-01-01）
 engine 5min --all
+
+# 从指定日期下载全部
+engine 5min --all --start=20230101
 
 # 增量更新全部
 engine 5min --all --update
